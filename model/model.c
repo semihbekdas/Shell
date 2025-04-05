@@ -41,7 +41,7 @@ ShmBuf* model_init() {
     
     shmp->fd = fd;
     shmp->cnt = 0;
-    
+    shmp->buf_size = BUF_SIZE;
     return shmp;
 }
 
@@ -115,41 +115,56 @@ int model_execute_command(const char* command, char* output, size_t output_size)
 }
 
 // Mesaj gönderme
-int model_send_message(ShmBuf* shmp, const char* message) {
+ShmBuf* model_send_message(ShmBuf* shmp, const char* message) {
     if (!shmp || !message) {
-        return -1;
+        return NULL;
     }
-    
     size_t msg_len = strlen(message);
-    
     // Semafor kilitle
     if (sem_wait(&shmp->sem) == -1) {
         perror("sem_wait failed");
-        return -1;
+        return NULL;
     }
-    
     // Mesajı paylaşılan belleğe kopyala
-    if (shmp->cnt + msg_len + 1 > BUF_SIZE ) {
-        // Tampon dolu, başa dön
-        shmp->cnt = 0;
+    if (shmp->cnt + msg_len + 1 > shmp->buf_size ) {
+        size_t new_buf_size = shmp->buf_size * 2;  // Örneğin, boyutu iki katına çıkar
+        size_t old_total_size = sizeof(ShmBuf) + shmp->buf_size;
+        size_t new_total_size = sizeof(ShmBuf) + new_buf_size;
+        // Dosya boyutunu arttır
+        if (ftruncate(shmp->fd, new_total_size) == -1) {
+            perror("ftruncate failed during resize");
+            sem_post(&shmp->sem);
+            return NULL;
+        }
+        // Belleği yeniden eşle
+        ShmBuf* new_shmp = mremap(shmp, old_total_size, new_total_size, MREMAP_MAYMOVE);
+        if (new_shmp == MAP_FAILED) {
+            perror("mremap failed");
+            sem_post(&shmp->sem);
+            return NULL;
+        }
+        // mremap yeni adresi döndürdüğü için shmp'yi güncelleyin.
+        shmp = new_shmp;
+        shmp->buf_size = new_buf_size;
     }
     
     memcpy(&shmp->msgbuf[shmp->cnt], message, msg_len);
     shmp->cnt += msg_len;
-    shmp->msgbuf[shmp->cnt] = '\n';  // Satır sonu ekle
+    shmp->msgbuf[shmp->cnt] = '\0';  // Satır sonu ekle
     shmp->cnt++;
     
     // Semafor serbest bırak
     if (sem_post(&shmp->sem) == -1) {
         perror("sem_post failed");
-        return -1;
+        return NULL;
     }
     
-    return 0;
+    return shmp;
 }
 
 // Mesajları okuma
-int model_read_messages(ShmBuf* shmp, char* buffer, size_t buffer_size) {
+int model_read_messages(ShmBuf* shmp, char* last_message, size_t buffer_size) {
+    char buffer[shmp->buf_size];
     if (!shmp || !buffer) {
         return -1;
     }
@@ -163,7 +178,13 @@ int model_read_messages(ShmBuf* shmp, char* buffer, size_t buffer_size) {
     // Mesajları buffer'a kopyala
     size_t copy_size = (shmp->cnt < buffer_size - 1) ? shmp->cnt : buffer_size - 1;
     memcpy(buffer, shmp->msgbuf, copy_size);
-    buffer[copy_size] = '\0';  // Null-terminate
+
+    size_t pos = 0;
+    while (pos < copy_size) {
+        printf("%s\n", buffer + pos);
+        strcpy(last_message,buffer+pos);
+        pos += strlen(buffer + pos) + 1;
+    }
     
     // Semafor serbest bırak
     if (sem_post(&shmp->sem) == -1) {
@@ -176,27 +197,35 @@ int model_read_messages(ShmBuf* shmp, char* buffer, size_t buffer_size) {
 
 // Temizleme
 void model_cleanup(ShmBuf* shmp) {
-    if (!shmp) {
-        return;
+    if (!shmp) return;
+
+    // Semafor yok et    
+    if (sem_destroy(&shmp->sem) == -1) {
+        perror("model_cleanup: sem_destroy failed");
+    }
+
+    // Paylaşılan bellek dosyasını kapat ve kaldır
+    if (close(shmp->fd) == -1) {
+        perror("model_cleanup: close failed");
     }
     
-    // Semafor yok et
-    sem_destroy(&shmp->sem);
-    
     // Paylaşılan belleği kaldır
-    munmap(shmp, sizeof(ShmBuf) + BUF_SIZE);
-    
-    // Paylaşılan bellek dosyasını kapat ve kaldır
-    close(shmp->fd);
-    shm_unlink(SHARED_FILE_PATH);
+    if (munmap(shmp, sizeof(ShmBuf) + BUF_SIZE) == -1) {
+        perror("model_cleanup: munmap failed");
+    }
+
+    if (shm_unlink(SHARED_FILE_PATH) == -1) {
+        perror("model_cleanup: shm_unlink failed");
+    }
+
+
 }
 
 
 
 
 
-//yapılacaklar tampon doluysa yer ayırma ,string-null sonlandırma ve exec shı düzeltme 
-// model_cleanup()a hata kontrolü ekle
+//yapılacaklar tampon doluysa yer ayırma ,string-null sonlandırma ve exec shı düzeltme
 /*
 int model_execute_command(const char* command, char* output, size_t output_size) {
  fonksiyonunda sha göndermeden kendin redirection yapabilirsin
@@ -215,22 +244,6 @@ Ya da eski mesajları kaydırıp yenisine yer açabilirsin (ring buffer tarzı)
 Mesajı reddet (return -2 gibi).
 Döngüsel tampon uygula (baş ve son işaretçileri ile).
 Büyük Mesajlar: msg_len > BUF_SIZE - sizeof(ShmBuf) durumunda mesajı kırpmak veya hata döndürmek iyi olabilir.
-Null Sonlandırma: \n yerine veya ek olarak \0 eklenebilir, çünkü msgbuf’u string olarak okuyacaksan bu gerekli.
 */
-
-/*
-mesaj okuma da 
-Veri Bütünlüğü: msgbuf’ta satır sonları (\n) var (çünkü model_send_message()’ta ekleniyor), ama null sonlandırıcı yok. Eğer msgbuf’u bir string olarak değil, ham bayt dizisi olarak düşünüyorsan bu doğru. Ancak string olarak okunacaksa, her mesajın null ile sonlanması gerekebilir.
-Okunan Veri Miktarı: Şu an tüm tamponu kopyalıyorsun. Eğer birden fazla mesaj varsa ve sadece son mesajı veya belirli bir kısmı okumak istersen, bu kontrol eksik.
-Öneri:
-Eğer msgbuf’u bir string olarak düşünüyorsan, model_send_message()’ta \n yerine \0 kullanmayı düşünebilirsin.
-Alternatif olarak, belirli bir mesajı okumak için bir ofset veya işaretçi eklenebilir (isteğe bağlı).
-
-Alternatif: String Tabanlı Okuma
-Eğer msgbuf’u null sonlandırmalı string’ler olarak saklamak istersen:
-
-model_send_message()’ta: shmp->msgbuf[shmp->cnt] = '\0'; kullan.
-model_read_messages()’ta: strncpy ile kopyala ve son mesajı al (isteğe bağlı).
-strncpy Kullanımı: memcpy yerine strncpy ile string tabanlı kopyalama yapılabilir */
 
 

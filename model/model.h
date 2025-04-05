@@ -1,5 +1,6 @@
 #ifndef MODEL_H
 #define MODEL_H
+#define _GNU_SOURCE
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,13 +29,14 @@ typedef struct shmbuf {
     sem_t sem;     // Okuma/yazma kontrolü için semafor
     size_t cnt;    // 'msgbuf' içinde kullanılan bayt sayısı
     int fd;        // Dosya tanımlayıcısı
+    size_t buf_size;
     char msgbuf[]; // Transfer edilen veri
 } ShmBuf;
 
 // Model fonksiyonları
 ShmBuf* model_init();
 int model_execute_command(const char* command, char* output, size_t output_size);
-int model_send_message(ShmBuf* shmp, const char* message);
+ShmBuf* model_send_message(ShmBuf* shmp, const char* message);
 int model_read_messages(ShmBuf* shmp, char* buffer, size_t buffer_size);
 void model_cleanup(ShmBuf* shmp);
 
