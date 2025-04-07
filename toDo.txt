@@ -1,6 +1,8 @@
 clear yazınca terminal temizlenicek
  Kullanıcıların sekmelerde veya ayrı pencerelerde kabukları açıp kapatmasına izin verin. buradaki bug düzeltilecek
+ terminal kapatılırken düzgün kapanmıyor
 terminal adları farklı renklerde olabilir (Mesajlar renk kodludur veya kullanıcı adlarıyla ön eklenmiştir.)
+
 
 eklenecekler
 Kullanıcı Kimlikleri : Mesaj gönderenlere benzersiz kullanıcı adları/renkler atayın.
