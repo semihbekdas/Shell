@@ -1,0 +1,16 @@
+clear yazınca terminal temizlenicek
+ Kullanıcıların sekmelerde veya ayrı pencerelerde kabukları açıp kapatmasına izin verin. buradaki bug düzeltilecek
+ terminal kapatılırken düzgün kapanmıyor
+terminal adları farklı renklerde olabilir (Mesajlar renk kodludur veya kullanıcı adlarıyla ön eklenmiştir.)
+
+
+eklenecekler
+Kullanıcı Kimlikleri : Mesaj gönderenlere benzersiz kullanıcı adları/renkler atayın.
+Özel Mesajlaşma : Belirli kabuklar arasında doğrudan mesajlaşmaya izin ver.
+Geçmiş : Komut/mesaj geçmişini scrollback ile uygula.
+Dosya Aktarımı : Dosya paylaşımını desteklemek için mesajlaşmayı genişletin.
+
+
+read me hazırlanacak
+rapor hazırlanacak
+sunuma çalışılacak
