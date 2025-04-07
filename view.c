@@ -344,8 +344,19 @@ void on_command_entry_activated(GtkEntry *entry, gpointer user_data) {
             if (strlen(output) > max_output_len) {
                 output[max_output_len] = '\0';
             }
-            snprintf(error_msg, sizeof(error_msg), "Komut çalıştırma hatası (kod: %d)\n%s\n", result, output);
-            view_update_terminal_output(view, terminal_id, error_msg);
+            int written = snprintf(error_msg, sizeof(error_msg), "Komut çalıştırma hatası (kod: %d)\n%s\n", result, output);
+        
+        // Kesinti olup olmadığını kontrol et
+        if (written >= (int)sizeof(error_msg)) {
+            // Kesinti oldu, mesajın sonuna kesinti bilgisi ekle
+            const char *truncated_msg = "... (çıktı kesildi)";
+            size_t truncated_len = strlen(truncated_msg);
+            if (sizeof(error_msg) > truncated_len + 1) {
+                strcpy(error_msg + sizeof(error_msg) - truncated_len - 1, truncated_msg);
+            }
+        }
+        
+        view_update_terminal_output(view, terminal_id, error_msg);
         }
     }
     
@@ -381,14 +392,25 @@ void on_close_terminal_clicked(GtkButton *button, gpointer user_data) {
     
     // Son terminali kapatmaya çalışıyorsa, izin verme
     if (data->view->terminal_count <= 1) {
-        // GTK4 uyumlu dialog kullan
-        GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(data->view->window),
-                                                  GTK_DIALOG_MODAL,
-                                                  GTK_MESSAGE_INFO,
-                                                  GTK_BUTTONS_OK,
-                                                  "En az bir terminal açık kalmalıdır.");
-        g_signal_connect(dialog, "response", G_CALLBACK(gtk_window_destroy), NULL);
-        gtk_window_present(GTK_WINDOW(dialog));
+        // Eski kod:
+        // GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(data->view->window),
+        //                                           GTK_DIALOG_MODAL,
+        //                                           GTK_MESSAGE_INFO,
+        //                                           GTK_BUTTONS_OK,
+        //                                           "En az bir terminal açık kalmalıdır.");
+        // g_signal_connect(dialog, "response", G_CALLBACK(gtk_window_destroy), NULL);
+        // gtk_window_present(GTK_WINDOW(dialog));
+        
+        // Yeni kod (GtkAlertDialog kullanarak):
+        GtkAlertDialog *alert = gtk_alert_dialog_new("En az bir terminal açık kalmalıdır.");
+        gtk_alert_dialog_set_modal(alert, TRUE);
+        gtk_alert_dialog_set_detail(alert, "Programın çalışması için en az bir terminal gereklidir.");
+        gtk_alert_dialog_set_buttons(alert, (const char*[]){"Tamam", NULL});
+        gtk_alert_dialog_set_default_button(alert, 0);
+        gtk_alert_dialog_set_cancel_button(alert, 0);
+        
+        gtk_alert_dialog_choose(alert, GTK_WINDOW(data->view->window), NULL, NULL, NULL);
+        g_object_unref(alert);
         return;
     }
     

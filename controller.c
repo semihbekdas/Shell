@@ -102,7 +102,20 @@ int controller_execute_command(Controller *controller, int terminal_id, const ch
     } else {
         // Komut hatası
         char error_msg[4096];
-        snprintf(error_msg, sizeof(error_msg), "Komut çalıştırma hatası (kod: %d)\n%s\n", result, output);
+        int written = snprintf(error_msg, sizeof(error_msg), 
+                              "Komut çalıştırma hatası (kod: %d)\n%s\n", 
+                              result, output);
+        
+        // Kesinti olup olmadığını kontrol et
+        if (written >= (int)sizeof(error_msg)) {
+            // Kesinti oldu, mesajın sonuna kesinti bilgisi ekle
+            const char *truncated_msg = "... (çıktı kesildi)";
+            size_t truncated_len = strlen(truncated_msg);
+            if (sizeof(error_msg) > truncated_len + 1) {
+                strcpy(error_msg + sizeof(error_msg) - truncated_len - 1, truncated_msg);
+            }
+        }
+        
         view_update_terminal_output(controller->view, terminal_id, error_msg);
     }
     

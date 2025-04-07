@@ -4,7 +4,7 @@
 
 int main(int argc, char **argv) {
     // GTK uygulamasını oluştur
-    GtkApplication *app = gtk_application_new("com.example.MultiUserShells", G_APPLICATION_FLAGS_NONE);
+    GtkApplication *app = gtk_application_new("com.example.MultiUserShells", G_APPLICATION_DEFAULT_FLAGS);
     
     // Controller başlat
     Controller *controller = controller_init(app);
