@@ -1,4 +1,6 @@
 #include "model.h"
+#include <errno.h>
+#include <limits.h>  // PATH_MAX için
 
 // Model başlatma
 ShmBuf* model_init() {
@@ -73,6 +75,78 @@ ShmBuf* model_init() {
     return shmp;
 }
 
+// CD komutu kontrolü
+int is_cd_command(const char* command, char* directory) {
+    if (!command || !directory) return 0;
+    
+    // Komut kopyası oluştur
+    char cmd_copy[4096];
+    strncpy(cmd_copy, command, sizeof(cmd_copy) - 1);
+    cmd_copy[sizeof(cmd_copy) - 1] = '\0';
+    
+    // Komut argümanlarını ayır
+    char* args[64] = {0}; // En fazla 64 argüman
+    int arg_count = 0;
+    
+    char* token = strtok(cmd_copy, " \t");
+    while (token && arg_count < 63) {
+        args[arg_count++] = token;
+        token = strtok(NULL, " \t");
+    }
+    
+    if (arg_count == 0) return 0;
+    
+    // CD komutu mu kontrol et
+    if (strcmp(args[0], "cd") == 0) {
+        if (arg_count > 1) {
+            // Hedef dizini kopyala
+            strcpy(directory, args[1]);
+        } else {
+            // Argüman yoksa $HOME dizinine git
+            strcpy(directory, getenv("HOME") ? getenv("HOME") : ".");
+        }
+        return 1;
+    }
+    
+    return 0;
+}
+
+// İnteraktif komut kontrolü
+int is_interactive_command(const char* command) {
+    if (!command) return 0;
+    
+    // Komut argümanlarını ayır
+    char cmd_copy[4096];
+    strncpy(cmd_copy, command, sizeof(cmd_copy) - 1);
+    cmd_copy[sizeof(cmd_copy) - 1] = '\0';
+    
+    char* args[64] = {0}; // En fazla 64 argüman
+    int arg_count = 0;
+    
+    char* token = strtok(cmd_copy, " \t");
+    while (token && arg_count < 63) {
+        args[arg_count++] = token;
+        token = strtok(NULL, " \t");
+    }
+    
+    if (arg_count == 0) return 0;
+    
+    // İnteraktif komutları kontrol et
+    if (strcmp(args[0], "cat") == 0 && arg_count == 1) {
+        // Argümansız cat komutu interaktiftir
+        return 1;
+    }
+    
+    // Diğer interaktif komutlar da eklenebilir
+    if (strcmp(args[0], "read") == 0) return 1;
+    if (strcmp(args[0], "more") == 0) return 1;
+    if (strcmp(args[0], "less") == 0) return 1;
+    if (strcmp(args[0], "nano") == 0) return 1;
+    if (strcmp(args[0], "vim") == 0) return 1;
+    if (strcmp(args[0], "vi") == 0) return 1;
+    
+    return 0;
+}
 
 // Komut çalıştırma
 int model_execute_command(const char* command, char* output, size_t output_size) {
@@ -83,6 +157,37 @@ int model_execute_command(const char* command, char* output, size_t output_size)
     // Boş komut kontrolü
     if (strlen(command) == 0) {
         output[0] = '\0';
+        return 0;
+    }
+    
+    // CD komutu kontrolü
+    char directory[PATH_MAX];
+    if (is_cd_command(command, directory)) {
+        // Dizini değiştir
+        if (chdir(directory) == 0) {
+            // Başarılı
+            char current_dir[PATH_MAX];
+            if (getcwd(current_dir, sizeof(current_dir)) != NULL) {
+                snprintf(output, output_size, "Dizin değiştirildi: %s\n", current_dir);
+            } else {
+                snprintf(output, output_size, "Dizin değiştirildi: %s\n", directory);
+            }
+            return 0;
+        } else {
+            // Başarısız
+            snprintf(output, output_size, "Dizin değiştirilemedi: %s\n", directory);
+            return -1;
+        }
+    }
+    
+    // İnteraktif komut kontrolü
+    if (is_interactive_command(command)) {
+        // İnteraktif komut için özel mesaj
+        snprintf(output, output_size, 
+                "İnteraktif komut tespit edildi: %s\n"
+                "Bu komut kullanıcı girdisi bekliyor ve terminal arayüzünde doğrudan çalıştırılamaz.\n"
+                "Lütfen dosya yönlendirme kullanın (örn: cat < dosya.txt) veya argüman belirtin (örn: cat dosya.txt).\n", 
+                command);
         return 0;
     }
     
@@ -317,7 +422,9 @@ int model_execute_command(const char* command, char* output, size_t output_size)
                 execvp(args[0], args);
                 
                 // execvp başarısız olursa buraya ulaşır
-                perror("execvp failed");
+                char error_msg[256];
+                snprintf(error_msg, sizeof(error_msg), "execvp failed: %s", strerror(errno));
+                perror(error_msg);
                 exit(EXIT_FAILURE);
             }
         }
@@ -331,15 +438,50 @@ int model_execute_command(const char* command, char* output, size_t output_size)
         
         // Son komutun çıktısını oku (eğer çıkış yönlendirme yoksa)
         if (!has_output_redir) {
-            ssize_t bytes_read = read(final_pipe[0], output, output_size - 1);
-            if (bytes_read == -1) {
-                perror("read failed");
+            // Non-blocking I/O için dosya tanımlayıcısını ayarla
+            int flags = fcntl(final_pipe[0], F_GETFL, 0);
+            fcntl(final_pipe[0], F_SETFL, flags | O_NONBLOCK);
+            
+            // Timeout için değişkenler
+            struct timeval tv;
+            fd_set readfds;
+            int ready;
+            
+            // Okuma için hazırlan
+            FD_ZERO(&readfds);
+            FD_SET(final_pipe[0], &readfds);
+            
+            // 2 saniye timeout ayarla
+            tv.tv_sec = 2;
+            tv.tv_usec = 0;
+            
+            // select() ile timeout'lu okuma
+            ready = select(final_pipe[0] + 1, &readfds, NULL, NULL, &tv);
+            
+            if (ready == -1) {
+                perror("select failed");
                 close(final_pipe[0]);
                 return -1;
+            } else if (ready == 0) {
+                // Timeout oluştu - veri yok
+                snprintf(output, output_size, "Komut çalışıyor, ancak henüz çıktı üretmedi.\n");
+            } else {
+                // Veri okumaya hazır
+                ssize_t bytes_read = read(final_pipe[0], output, output_size - 1);
+                if (bytes_read == -1) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        // Veri henüz hazır değil
+                        snprintf(output, output_size, "Komut çalışıyor, ancak henüz çıktı üretmedi.\n");
+                    } else {
+                        perror("read failed");
+                        close(final_pipe[0]);
+                        return -1;
+                    }
+                } else {
+                    // Veri okundu
+                    output[bytes_read] = '\0';
+                }
             }
-            
-            // Null-terminate
-            output[bytes_read] = '\0';
         } else {
             // Çıkış yönlendirme varsa, çıktı dosyaya yazılır
             output[0] = '\0';
@@ -347,15 +489,29 @@ int model_execute_command(const char* command, char* output, size_t output_size)
         
         close(final_pipe[0]);
         
-        // Tüm çocuk süreçlerin tamamlanmasını bekle
+        // Tüm çocuk süreçlerin tamamlanmasını bekle (WNOHANG ile non-blocking)
         int last_status = 0;
         for (int i = 0; i < cmd_count; i++) {
             int status;
-            waitpid(pids[i], &status, 0);
-            
-            // Son komutun çıkış kodunu kaydet
-            if (i == cmd_count - 1) {
-                last_status = WEXITSTATUS(status);
+            // WNOHANG ile non-blocking wait
+            if (waitpid(pids[i], &status, WNOHANG) == 0) {
+                // Süreç hala çalışıyor
+                if (i == cmd_count - 1) {
+                    // Son komut hala çalışıyorsa, bilgi mesajı ekle
+                    if (strlen(output) == 0) {
+                        snprintf(output, output_size, "Komut arka planda çalışıyor...\n");
+                    }
+                }
+            } else {
+                // Süreç tamamlandı
+                if (i == cmd_count - 1) {
+                    if (WIFEXITED(status)) {
+                        last_status = WEXITSTATUS(status);
+                        if (last_status != 0 && strlen(output) == 0) {
+                            snprintf(output, output_size, "Komut çalıştırma hatası (kod: %d)\n", last_status);
+                        }
+                    }
+                }
             }
         }
         
@@ -473,16 +629,50 @@ int model_execute_command(const char* command, char* output, size_t output_size)
             if (!has_output_redir) {
                 close(pipefd[1]); // Yazma ucunu kapat
                 
-                // Çocuk sürecin çıktısını oku
-                ssize_t bytes_read = read(pipefd[0], output, output_size - 1);
-                if (bytes_read == -1) {
-                    perror("read failed");
+                // Non-blocking I/O için dosya tanımlayıcısını ayarla
+                int flags = fcntl(pipefd[0], F_GETFL, 0);
+                fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
+                
+                // Timeout için değişkenler
+                struct timeval tv;
+                fd_set readfds;
+                int ready;
+                
+                // Okuma için hazırlan
+                FD_ZERO(&readfds);
+                FD_SET(pipefd[0], &readfds);
+                
+                // 2 saniye timeout ayarla
+                tv.tv_sec = 2;
+                tv.tv_usec = 0;
+                
+                // select() ile timeout'lu okuma
+                ready = select(pipefd[0] + 1, &readfds, NULL, NULL, &tv);
+                
+                if (ready == -1) {
+                    perror("select failed");
                     close(pipefd[0]);
                     return -1;
+                } else if (ready == 0) {
+                    // Timeout oluştu - veri yok
+                    snprintf(output, output_size, "Komut çalışıyor, ancak henüz çıktı üretmedi.\n");
+                } else {
+                    // Veri okumaya hazır
+                    ssize_t bytes_read = read(pipefd[0], output, output_size - 1);
+                    if (bytes_read == -1) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            // Veri henüz hazır değil
+                            snprintf(output, output_size, "Komut çalışıyor, ancak henüz çıktı üretmedi.\n");
+                        } else {
+                            perror("read failed");
+                            close(pipefd[0]);
+                            return -1;
+                        }
+                    } else {
+                        // Veri okundu
+                        output[bytes_read] = '\0';
+                    }
                 }
-                
-                // Null-terminate
-                output[bytes_read] = '\0';
                 
                 close(pipefd[0]);
             } else {
@@ -490,11 +680,26 @@ int model_execute_command(const char* command, char* output, size_t output_size)
                 output[0] = '\0';
             }
             
-            // Çocuk sürecin tamamlanmasını bekle
+            // Çocuk sürecin tamamlanmasını bekle (WNOHANG ile non-blocking)
             int status;
-            waitpid(pid, &status, 0);
-            
-            return WEXITSTATUS(status);
+            if (waitpid(pid, &status, WNOHANG) == 0) {
+                // Süreç hala çalışıyor
+                if (strlen(output) == 0) {
+                    snprintf(output, output_size, "Komut arka planda çalışıyor...\n");
+                }
+                return 0; // Süreç devam ediyor, başarılı kabul et
+            } else {
+                // Süreç tamamlandı
+                if (WIFEXITED(status)) {
+                    int exit_status = WEXITSTATUS(status);
+                    if (exit_status != 0 && strlen(output) == 0) {
+                        snprintf(output, output_size, "Komut çalıştırma hatası (kod: %d)\n", exit_status);
+                    }
+                    return exit_status;
+                } else {
+                    return -1;
+                }
+            }
         }
     }
 }
