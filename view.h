@@ -2,6 +2,7 @@
 #define VIEW_H
 
 #include <gtk/gtk.h>
+#include <stdbool.h>
 #include "model.h"
 
 // View yapısı
@@ -69,7 +70,7 @@ int view_find_terminal_index(View *view, int terminal_id);
  * @param output Gösterilecek çıktı
  * @return Başarı durumu (0: başarılı, -1: başarısız)
  */
-int view_update_terminal_output(View *view, int terminal_id, const char *output);
+int view_update_terminal_output(View *view, int terminal_id, const char *output, bool controller);
 
 /**
  * Terminal içeriğini temizler

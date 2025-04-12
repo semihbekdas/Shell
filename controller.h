@@ -4,6 +4,7 @@
 #include "model.h"
 #include "view.h"
 #include <gtk/gtk.h>
+#include <stdbool.h>
 
 // Controller yapısı
 typedef struct {

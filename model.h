@@ -11,6 +11,7 @@
 #include <sys/wait.h>
 #include <sys/mman.h>
 #include <semaphore.h>
+#include <stdbool.h>
 
 #define BUF_SIZE 4096
 #define SHARED_FILE_PATH "mymsgbuf"

@@ -204,7 +204,7 @@ int view_find_terminal_index(View *view, int terminal_id) {
 }
 
 // Terminal çıktısını günceller
-int view_update_terminal_output(View *view, int terminal_id, const char *output) {
+int view_update_terminal_output(View *view, int terminal_id, const char *output,bool controller) {
     if (!view || !output) {
         return -1;
     }
@@ -213,13 +213,36 @@ int view_update_terminal_output(View *view, int terminal_id, const char *output)
     if (terminal_index < 0 || terminal_index >= view->terminal_count) {
         return -1;
     }
-    
+
     GtkTextIter iter;
     gtk_text_buffer_get_end_iter(view->terminal_buffers[terminal_index], &iter);
-    gtk_text_buffer_insert(view->terminal_buffers[terminal_index], &iter, output, -1);
-    
+
+    if(controller){
+
+        gtk_text_buffer_insert(view->terminal_buffers[terminal_index], &iter, output, -1);
+        
+    }
+    else{
+        char terminal_name[32];
+        snprintf(terminal_name, sizeof(terminal_name), "terminal%d:", terminal_index + 1);
+        
+        GtkTextTag *terminal_tag = gtk_text_buffer_create_tag(view->terminal_buffers[terminal_index], NULL,
+                                                           "foreground", "blue",  // Mavi renk kullan
+                                                           "weight", PANGO_WEIGHT_BOLD,  // Kalın yazı
+                                                           NULL);
+        
+        // Terminal göstergesini renkli ekle
+        gtk_text_buffer_insert_with_tags(view->terminal_buffers[terminal_index], &iter, 
+                                       terminal_name, -1, terminal_tag, NULL);
+        
+        // Komutu ekle
+        gtk_text_buffer_insert(view->terminal_buffers[terminal_index], &iter, " $ ", -1);
+        gtk_text_buffer_insert(view->terminal_buffers[terminal_index], &iter, output, -1);
+        gtk_text_buffer_insert(view->terminal_buffers[terminal_index], &iter, "\n", -1);
+    }
+
     // Otomatik kaydırma
-    scroll_to_end(GTK_TEXT_VIEW(view->terminal_views[terminal_index]));
+        scroll_to_end(GTK_TEXT_VIEW(view->terminal_views[terminal_index]));
     
     return 0;
 }
@@ -355,11 +378,21 @@ void on_command_entry_activated(GtkEntry *entry, gpointer user_data) {
     if (!command || strlen(command) == 0) {
         return;
     }
+
+    // Hangi terminalde olduğumuzu bul
+    int terminal_index = view_find_terminal_index(view, terminal_id);
+    if (terminal_index < 0) return;
+    
+    // Terminal çıktısına komutu ekle, ama önce renkli terminal göstergesi ile
+    GtkTextIter iter;
+    gtk_text_buffer_get_end_iter(view->terminal_buffers[terminal_index], &iter);
+    
+    // Terminal göstergesi için etiket oluştur
     
     // Komutu terminal çıktısına ekle
     char prompt[512];
-    snprintf(prompt, sizeof(prompt), "$ %s\n", command);
-    view_update_terminal_output(view, terminal_id, prompt);
+    view_update_terminal_output(view, terminal_id, command, false);
+    
     
     // "exit" komutu kontrolü
     if (strcmp(command, "exit") == 0) {

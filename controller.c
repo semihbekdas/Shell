@@ -110,12 +110,12 @@ int controller_execute_command(Controller *controller, int terminal_id, const ch
     // Çıktıyı görüntüle
     if (result == 0) {
         // Komut başarılı
-        view_update_terminal_output(controller->view, terminal_id, output);
+        view_update_terminal_output(controller->view, terminal_id, output, true);
     } else {
         // Komut hatası
         char error_msg[4096];
         snprintf(error_msg, sizeof(error_msg), "Komut çalıştırma hatası (kod: %d)\n%s\n", result, output);
-        view_update_terminal_output(controller->view, terminal_id, error_msg);
+        view_update_terminal_output(controller->view, terminal_id, error_msg, true);
     }
     
     return result;
@@ -136,7 +136,7 @@ int controller_send_message(Controller *controller, int terminal_id, const char 
     
     if (result == NULL) {
         // Mesaj gönderme hatası
-        view_update_terminal_output(controller->view, terminal_id, "Mesaj gönderilemedi!\n");
+        view_update_terminal_output(controller->view, terminal_id, "Mesaj gönderilemedi!\n", true);
         return -1;
     }
     
