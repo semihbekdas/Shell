@@ -52,6 +52,57 @@ View* view_init(GtkApplication *app, ShmBuf *shm_buffer) {
     gtk_window_set_title(GTK_WINDOW(view->window), "Multi-User Communicating Shells");
     gtk_window_set_default_size(GTK_WINDOW(view->window), 1000, 700);
     
+    // Karanlık tema CSS'i oluştur
+GtkCssProvider *provider = gtk_css_provider_new();
+const char *css_data = 
+    /* Ana pencere ve konteynırlar */
+    "window { background-color: #1e1e1e; }"
+    "box { background-color: #1e1e1e; }"
+    
+    /* Metin alanları */
+    "textview { background-color: #000000; color: #ffffff; caret-color: #ffffff; }"
+    "textview text { background-color: #000000; color: #ffffff; }"
+    "scrolledwindow { background-color: #1e1e1e; }"
+    
+    /* Giriş alanları */
+    "entry { background-color: #2d2d2d; color: #ffffff; caret-color: #ffffff; border: 1px solid #3d3d3d; }"
+    
+    /* Düz butonlar */
+    "button { background-color: #3d3d3d; color: #ffffff; }"
+    "button:hover { background-color: #4d4d4d; }"
+    
+    /* Yeni terminal butonu (mavi) */
+    "button.add-tab { background-color: #0066cc; color: #0066cc; }"
+    "button.add-tab:hover { background-color: #0077ee; }"
+    
+    /* Terminal kapatma butonu (kırmızı) */
+    "button.close-tab { background-color: #cc0000; color: #cc0000; }"
+    "button.close-tab:hover { background-color: #ee0000; }"
+    
+    /* Notebook ve sekmeler */
+    "notebook { background-color: #1e1e1e; }"
+    "notebook tabs { background-color: #2d2d2d; }"
+    "notebook tab { background-color: #2d2d2d; color: #ffffff; padding: 4px; }"
+    "notebook tab:checked { background-color: #3d3d3d; }"
+    "notebook header { background-color: #2d2d2d; }"
+    
+    /* Mesaj paneli */
+    "label.message-header { color: #ffffff; font-weight: bold; font-size: 14px; margin: 5px; }"
+    
+    /*Yazılar*/
+    "label.prompt-label { color: #ffffff; }";
+
+    
+
+    gtk_css_provider_load_from_data(provider, css_data, -1);
+
+    // CSS'i tüm ekran için ayarla
+    GdkDisplay *display = gdk_display_get_default();
+    gtk_style_context_add_provider_for_display(display, 
+                                         GTK_STYLE_PROVIDER(provider),
+                                        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(provider);
+
     // Ana dikey düzen kutusu
     view->main_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     gtk_window_set_child(GTK_WINDOW(view->window), view->main_box);
@@ -66,6 +117,7 @@ View* view_init(GtkApplication *app, ShmBuf *shm_buffer) {
     gtk_box_append(GTK_BOX(terminal_area), header_box);
     
     GtkWidget *add_tab_button = gtk_button_new_with_label("+");
+    gtk_widget_add_css_class(add_tab_button, "add-tab");
     gtk_box_append(GTK_BOX(header_box), add_tab_button);
     
     // Terminal sekmeleri
@@ -80,6 +132,11 @@ View* view_init(GtkApplication *app, ShmBuf *shm_buffer) {
     
     // Mesaj paneli başlığı
     GtkWidget *message_header = gtk_label_new("Shared Messages");
+    gtk_widget_add_css_class(message_header, "message-header");
+    // Etiketin daha görünür olması için ortala
+    gtk_widget_set_halign(message_header, GTK_ALIGN_CENTER);
+    gtk_widget_set_margin_top(message_header, 10);
+    gtk_widget_set_margin_bottom(message_header, 10);
     gtk_box_append(GTK_BOX(view->message_panel), message_header);
     
     // Mesaj görüntüleme alanı
@@ -137,6 +194,7 @@ int view_add_terminal(View *view, const char *title) {
     gtk_box_append(GTK_BOX(terminal_box), input_box);
     
     GtkWidget *prompt_label = gtk_label_new("$ ");
+    gtk_widget_add_css_class(prompt_label, "prompt-label");
     gtk_box_append(GTK_BOX(input_box), prompt_label);
     
     view->input_entries[terminal_index] = gtk_entry_new();
@@ -150,6 +208,7 @@ int view_add_terminal(View *view, const char *title) {
     
     // Sekme kapatma düğmesi
     GtkWidget *close_button = gtk_button_new_from_icon_name("window-close-symbolic");
+    gtk_widget_add_css_class(close_button, "close-tab");
     gtk_widget_set_valign(close_button, GTK_ALIGN_CENTER);
     gtk_box_append(GTK_BOX(tab_box), close_button);
     
@@ -227,9 +286,9 @@ int view_update_terminal_output(View *view, int terminal_id, const char *output,
         snprintf(terminal_name, sizeof(terminal_name), "terminal%d:", terminal_index + 1);
         
         GtkTextTag *terminal_tag = gtk_text_buffer_create_tag(view->terminal_buffers[terminal_index], NULL,
-                                                           "foreground", "blue",  // Mavi renk kullan
-                                                           "weight", PANGO_WEIGHT_BOLD,  // Kalın yazı
-                                                           NULL);
+            "foreground", "#00BFFF", // Açık mavi
+            "weight", PANGO_WEIGHT_BOLD,
+            NULL);
         
         // Terminal göstergesini renkli ekle
         gtk_text_buffer_insert_with_tags(view->terminal_buffers[terminal_index], &iter, 
@@ -260,9 +319,9 @@ int view_update_message_panel(View *view, const char *message, const char *usern
     if (username && strlen(username) > 0) {
         // Kullanıcı adı için etiket oluştur
         GtkTextTag *username_tag = gtk_text_buffer_create_tag(view->message_buffer, NULL,
-                                                            "foreground", "blue",
-                                                            "weight", PANGO_WEIGHT_BOLD,
-                                                            NULL);
+            "foreground", "#00BFFF", // Açık mavi
+            "weight", PANGO_WEIGHT_BOLD,
+            NULL);
         
         // Kullanıcı adını ekle
         gtk_text_buffer_insert_with_tags(view->message_buffer, &iter, username, -1, username_tag, NULL);
