@@ -21,6 +21,9 @@ typedef struct {
 static Message message_log[MAX_MESSAGES];
 static int message_count = 0;
 
+// Terminal durumunu kontrol etmek için zamanlayıcı
+static guint terminal_check_timer_id = 0;
+
 // Controller yapısını başlatır
 Controller* controller_init(GtkApplication *app) {
     // Controller yapısını oluştur
@@ -103,19 +106,50 @@ int controller_execute_command(Controller *controller, int terminal_id, const ch
         return -1;
     }
     
+    // Terminal sürecinin durumunu kontrol et
+    int status = model_check_terminal_process(controller->model, terminal_id);
+    
+    // Terminal süreci çalışmıyor veya hata oluşmuşsa yeniden başlat
+    if (status != 1) {
+        // Kullanıcıya bilgi ver
+        char restart_msg[256];
+        snprintf(restart_msg, sizeof(restart_msg), 
+                "Terminal %d yeniden başlatılıyor...\n", 
+                terminal_id + 1);
+        view_update_terminal_output(controller->view, terminal_id, restart_msg, true);
+        
+        // Eski terminal sürecini sonlandır (eğer hala varsa)
+        model_terminate_terminal_process(controller->model, terminal_id);
+        
+        // Yeni terminal süreci oluştur
+        if (model_create_terminal_process(controller->model, terminal_id) != 0) {
+            char error_msg[256];
+            snprintf(error_msg, sizeof(error_msg), 
+                    "Terminal %d başlatılamadı!\n", 
+                    terminal_id + 1);
+            view_update_terminal_output(controller->view, terminal_id, error_msg, true);
+            return -1;
+        }
+        
+        // Başlangıç mesajını oku
+        char output[4096] = {0};
+        usleep(100000); // 100ms bekle
+        model_read_output_from_terminal(controller->model, terminal_id, output, sizeof(output));
+        if (strlen(output) > 0) {
+            view_update_terminal_output(controller->view, terminal_id, output, true);
+        }
+    }
+    
     // Komutu çalıştır
     char output[4096] = {0};
-    int result = model_execute_command(command, output, sizeof(output));
+    int result = model_execute_command(command, output, sizeof(output), terminal_id);
+    
+    // Komut girişini gösterme - view.c'de zaten gösteriliyor, tekrar göstermeye gerek yok
+    // view_update_terminal_output(controller->view, terminal_id, command, false);
     
     // Çıktıyı görüntüle
-    if (result == 0) {
-        // Komut başarılı
+    if (strlen(output) > 0) {
         view_update_terminal_output(controller->view, terminal_id, output, true);
-    } else {
-        // Komut hatası
-        char error_msg[4096];
-        snprintf(error_msg, sizeof(error_msg), "Komut çalıştırma hatası (kod: %d)\n%s\n", result, output);
-        view_update_terminal_output(controller->view, terminal_id, error_msg, true);
     }
     
     return result;
@@ -215,6 +249,70 @@ int controller_update_messages(Controller *controller) {
     return result;
 }
 
+// Terminal durumlarını kontrol eder
+gboolean controller_check_terminals(gpointer user_data) {
+    Controller *controller = (Controller *)user_data;
+    
+    if (!controller || !controller->view) {
+        return G_SOURCE_REMOVE;
+    }
+    
+    // Tüm terminalleri kontrol et
+    for (int i = 0; i < controller->view->terminal_count; i++) {
+        int terminal_id = controller->view->terminal_ids[i];
+        
+        // Terminal sürecinin durumunu kontrol et
+        int status = model_check_terminal_process(controller->model, terminal_id);
+        
+        // Terminal süreci çalışmıyor ve otomatik yeniden başlatma gerekiyorsa
+        if (status != 1) {
+            // Kullanıcıya bilgi ver
+            char status_msg[256];
+            if (status == -1) {
+                snprintf(status_msg, sizeof(status_msg), 
+                        "Terminal başlatılıyor...\n");
+            } else if (status == -2) {
+                snprintf(status_msg, sizeof(status_msg), 
+                        "Terminal %d sinyal ile sonlandırıldı, yeniden başlatılıyor...\n", 
+                        terminal_id + 1);
+            } else if (status == -3 || status == -4) {
+                snprintf(status_msg, sizeof(status_msg), 
+                        "Terminal %d beklenmeyen şekilde sonlandı, yeniden başlatılıyor...\n", 
+                        terminal_id + 1);
+            } else {
+                snprintf(status_msg, sizeof(status_msg), 
+                        "Terminal %d çıkış kodu %d ile sonlandı, yeniden başlatılıyor...\n", 
+                        terminal_id + 1, status);
+            }
+            
+            view_update_terminal_output(controller->view, terminal_id, status_msg, true);
+            
+            // Eski terminal sürecini sonlandır (eğer hala varsa)
+            model_terminate_terminal_process(controller->model, terminal_id);
+            
+            // Yeni terminal süreci oluştur
+            if (model_create_terminal_process(controller->model, terminal_id) != 0) {
+                char error_msg[256];
+                snprintf(error_msg, sizeof(error_msg), 
+                        "Terminal %d başlatılamadı!\n", 
+                        terminal_id + 1);
+                view_update_terminal_output(controller->view, terminal_id, error_msg, true);
+                continue;
+            }
+            
+            // Başlangıç mesajını oku
+            char output[4096] = {0};
+            usleep(100000); // 100ms bekle
+            model_read_output_from_terminal(controller->model, terminal_id, output, sizeof(output));
+            if (strlen(output) > 0) {
+                view_update_terminal_output(controller->view, terminal_id, output, true);
+            }
+        }
+    }
+    
+    return G_SOURCE_CONTINUE;
+}
+
 // Yeni terminal oluşturur
 int controller_create_terminal(Controller *controller) {
     if (!controller || !controller->view) {
@@ -226,7 +324,27 @@ int controller_create_terminal(Controller *controller) {
     snprintf(title, sizeof(title), "Terminal %d", controller->view->next_terminal_id + 1);
     
     // Yeni terminal ekle
-    return view_add_terminal(controller->view, title);
+    int terminal_id = view_add_terminal(controller->view, title);
+    if (terminal_id < 0) {
+        return -1;
+    }
+    
+    // Terminal sürecini oluştur
+    if (model_create_terminal_process(controller->model, terminal_id) != 0) {
+        // Terminal süreci oluşturulamadı, terminal sekmesini kapat
+        view_close_terminal(controller->view, terminal_id);
+        return -1;
+    }
+    
+    // Başlangıç mesajını oku
+    char output[4096] = {0};
+    usleep(100000); // 100ms bekle
+    model_read_output_from_terminal(controller->model, terminal_id, output, sizeof(output));
+    if (strlen(output) > 0) {
+        view_update_terminal_output(controller->view, terminal_id, output, true);
+    }
+    
+    return terminal_id;
 }
 
 // Terminali kapatır
@@ -240,6 +358,9 @@ int controller_close_terminal(Controller *controller, int terminal_id) {
         return -1;
     }
     
+    // Terminal sürecini sonlandır
+    model_terminate_terminal_process(controller->model, terminal_id);
+    
     // Terminali kapat
     return view_close_terminal(controller->view, terminal_id);
 }
@@ -248,10 +369,15 @@ int controller_close_terminal(Controller *controller, int terminal_id) {
 void controller_cleanup(Controller *controller) {
     if (!controller) return;
     
-    // Zamanlayıcıyı durdur
+    // Zamanlayıcıları durdur
     if (controller->message_update_timer_id > 0) {
         g_source_remove(controller->message_update_timer_id);
         controller->message_update_timer_id = 0;
+    }
+    
+    if (terminal_check_timer_id > 0) {
+        g_source_remove(terminal_check_timer_id);
+        terminal_check_timer_id = 0;
     }
     
     // View temizle
@@ -289,6 +415,9 @@ void controller_activate(GtkApplication *app, gpointer user_data) {
     
     // Mesaj güncelleme zamanlayıcısını başlat (her 1 saniyede bir)
     controller->message_update_timer_id = g_timeout_add(1000, controller_message_update_timer, controller);
+    
+    // Terminal durumu kontrol zamanlayıcısını başlat (her 2 saniyede bir)
+    terminal_check_timer_id = g_timeout_add(2000, controller_check_terminals, controller);
 }
 
 // Periyodik mesaj güncelleme zamanlayıcısı callback fonksiyonu

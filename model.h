@@ -12,11 +12,13 @@
 #include <sys/mman.h>
 #include <semaphore.h>
 #include <stdbool.h>
+#include <limits.h>  // PATH_MAX için
 
 #define BUF_SIZE 4096
 #define SHARED_FILE_PATH "mymsgbuf"
 #define MAX_COMMAND_LENGTH 256
 #define MAX_PROCESSES 10
+#define MAX_TERMINALS 10  // Maksimum terminal sayısı
 
 // Process bilgilerini tutan yapı
 typedef struct {
@@ -24,6 +26,15 @@ typedef struct {
     char command[MAX_COMMAND_LENGTH];  // Komut metni
     int status;         // Çalışıyor/sonlandı durumu
 } ProcessInfo;
+
+// Terminal süreç bilgilerini tutan yapı
+typedef struct {
+    int terminal_id;                // Terminal ID
+    pid_t process_id;               // Terminal süreç ID'si
+    int pipe_to_terminal[2];        // Ana süreçten terminal sürecine veri göndermek için pipe
+    int pipe_from_terminal[2];      // Terminal sürecinden ana sürece veri göndermek için pipe
+    bool active;                    // Terminal aktif mi
+} TerminalProcess;
 
 // Paylaşılan bellek yapısı
 typedef struct shmbuf {
@@ -35,40 +46,26 @@ typedef struct shmbuf {
     int fd;        // Dosya tanımlayıcısı
     size_t buf_size;
     size_t last_read_pos; // Son okunan mesaj pozisyonu
+    
+    // Terminal süreç bilgileri
+    TerminalProcess terminal_processes[MAX_TERMINALS];
+    int terminal_count;
+    
     char msgbuf[]; // Transfer edilen veri
 } ShmBuf;
 
 // Model fonksiyonları
 ShmBuf* model_init();
-int model_execute_command(const char* command, char* output, size_t output_size);
+int model_execute_command(const char* command, char* output, size_t output_size, int terminal_id);
 ShmBuf* model_send_message(ShmBuf* shmp, const char* message);
 int model_read_messages(ShmBuf* shmp, char* buffer, size_t buffer_size);
 void model_cleanup(ShmBuf* shmp);
 
+// Terminal süreç yönetimi fonksiyonları
+int model_create_terminal_process(ShmBuf* shmp, int terminal_id);
+int model_send_command_to_terminal(ShmBuf* shmp, int terminal_id, const char* command);
+int model_read_output_from_terminal(ShmBuf* shmp, int terminal_id, char* output, size_t output_size);
+int model_terminate_terminal_process(ShmBuf* shmp, int terminal_id);
+int model_check_terminal_process(ShmBuf* shmp, int terminal_id);
+
 #endif /* MODEL_H */
-
-
-/*
-stdio.h ve stdlib.h: Standart giriş/çıkış ve bellek yönetimi için.
-unistd.h: fork(), pipe(), dup2() gibi POSIX fonksiyonları için.
-string.h: strncpy(), strlen() gibi string işlemleri için.
-fcntl.h: shm_open() ve dosya işlemleri için.
-sys/types.h: pid_t gibi tipler için.
-sys/wait.h: wait() ve waitpid() için.
-sys/mman.h: mmap() ve munmap() için.
-semaphore.h: sem_t ve semafor fonksiyonları için.
-*/
-
-/*
-sem: Semafor, süreçler arası senkronizasyon için.
-cnt: Tamponda kullanılan bayt sayısını tutar. Esnek diziyle uyumlu.
-fd: Paylaşılan bellek dosyasının tanımlayıcısı, temizlik için gerekli
-msgbuf[]: Esnek dizi */
-
-/*
-ShmBuf* model_init(): Paylaşılan belleği başlatır. Parametresiz, dönüş tipi pointer. .
-int model_execute_command(const char* command, char* output, size_t output_size): Komut çalıştırır, çıktıyı output'a yazar. int dönüş tipiyle başarı/başarısızlık bildirilebilir. .
-int model_send_message(ShmBuf* shmp, const char* message): Mesaj gönderir. .
-int model_read_messages(ShmBuf* shmp, char* buffer, size_t buffer_size): Mesajları okur. int ile okunan bayt sayısı veya hata kodu dönebilir.
-void model_cleanup(ShmBuf* shmp): Belleği temizler.
-*/
