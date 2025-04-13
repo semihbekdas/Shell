@@ -1,6 +1,0 @@
-
-eklenecekler
-Özel Mesajlaşma : Belirli kabuklar arasında doğrudan mesajlaşmaya izin ver.
-cd diyince başka bir dosyaya geçip orada pwd dediğimizde en baştaki konumu gösteriyot bunu düzelticez yani CD diyip başka dosyaya geçmeyi düzelticez
-terminale özel mesaj atma düzeltilcek
-Cat yazınca terminal donuyor bunu düzeltmemiz lazım
