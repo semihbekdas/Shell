@@ -7,7 +7,7 @@
 // Global değişken - her terminal için paylaşılan bellek işaretçisi
 static ShmBuf* g_shm_buffer = NULL;
 
-// Pipe tamponlarını temizle
+// Pipe tamponlarını temizle - daha agresif temizleme
 void flush_pipe(int pipe_fd) {
     if (pipe_fd < 0) return;
     
@@ -15,20 +15,47 @@ void flush_pipe(int pipe_fd) {
     int flags = fcntl(pipe_fd, F_GETFL, 0);
     fcntl(pipe_fd, F_SETFL, flags | O_NONBLOCK);
     
-    // Pipe'ı boşalt
-    char buffer[1024];
+    // Pipe'ı boşalt - daha büyük tampon ve daha fazla döngü
+    char buffer[8192]; // Daha büyük tampon (8KB)
     ssize_t bytes;
-    while ((bytes = read(pipe_fd, buffer, sizeof(buffer))) > 0) {
-        // Veriyi at
-    }
+    int total_flushed = 0;
+    int flush_attempts = 0;
     
-    // Hata kontrolü (EAGAIN/EWOULDBLOCK beklenen hata)
-    if (bytes < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-        perror("flush_pipe read error");
+    // Daha fazla veri temizleme ve daha fazla deneme
+    while (flush_attempts < 100) { // 100 deneme
+        bytes = read(pipe_fd, buffer, sizeof(buffer));
+        if (bytes > 0) {
+            total_flushed += bytes;
+            // 50MB'dan fazla veri temizlendiyse döngüden çık (sonsuz döngü önlemi)
+            if (total_flushed > 50 * 1024 * 1024) break;
+        } else if (bytes == 0 || (bytes < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
+            // Veri kalmadı veya hazır değil, kısa bir süre bekle ve tekrar dene
+            usleep(1000); // 1ms bekle
+            flush_attempts++;
+        } else {
+            // Diğer hatalar
+            break;
+        }
     }
     
     // Orijinal moda geri dön
     fcntl(pipe_fd, F_SETFL, flags);
+}
+
+// Komut geçerliliğini kontrol et
+int is_valid_command(const char* command) {
+    if (!command || strlen(command) == 0) return 0;
+    
+    // Sadece boşluk karakterlerinden oluşan komutları kontrol et
+    int only_whitespace = 1;
+    for (const char* p = command; *p; p++) {
+        if (*p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') {
+            only_whitespace = 0;
+            break;
+        }
+    }
+    
+    return !only_whitespace;
 }
 
 // İnteraktif komut kontrolü
@@ -64,9 +91,7 @@ int is_interactive_command(const char* command) {
     if (strcmp(args[0], "nano") == 0) return 1;
     if (strcmp(args[0], "vim") == 0) return 1;
     if (strcmp(args[0], "vi") == 0) return 1;
-    if (strcmp(args[0], "wc") == 0) return 1;
-
-
+    if (strcmp(args[0], "wc") == 0 && arg_count == 1) return 1;
     
     return 0;
 }
@@ -98,7 +123,7 @@ int is_cd_command(const char* command, char* directory) {
 // Terminal süreç fonksiyonu
 void terminal_process_main(int terminal_id, int read_pipe, int write_pipe) {
     char command[4096];
-    char output[8192]; // Çıktı tampon boyutu artırıldı
+    char output[65536]; // Çıktı tampon boyutu artırıldı (64KB)
     char current_dir[PATH_MAX];
     
     // Başlangıç dizinini al
@@ -123,6 +148,13 @@ void terminal_process_main(int terminal_id, int read_pipe, int write_pipe) {
             break;
         }
         
+        // Komut geçerliliğini kontrol et
+        if (!is_valid_command(command)) {
+            snprintf(output, sizeof(output), "Geçersiz komut: Boş veya sadece boşluk karakterleri içeren komut.\n");
+            write(write_pipe, output, strlen(output) + 1);
+            continue;
+        }
+        
         // Çıkış komutu kontrolü
         if (strcmp(command, "exit") == 0) {
             snprintf(output, sizeof(output), "Terminal %d kapatılıyor...\n", terminal_id + 1);
@@ -130,11 +162,22 @@ void terminal_process_main(int terminal_id, int read_pipe, int write_pipe) {
             break;
         }
         
-        // Sıfırlama komutu kontrolü
-        if (strcmp(command, "reset") == 0 || strcmp(command, "clear") == 0) {
-            // Terminali sıfırla
-            snprintf(output, sizeof(output), "Terminal %d sıfırlandı.\n", terminal_id + 1);
+        // Sıfırlama komutu kontrolü - reset komutu kaldırıldı
+        if (strcmp(command, "clear") == 0) {
+            // Terminali sıfırla ve pipe'ları temizle
+            flush_pipe(read_pipe);
+            
+            // Çıktı tamponunu temizle
+            memset(output, 0, sizeof(output));
+            
+            // Özel sıfırlama mesajı gönder - özel bir işaretleyici ile
+            snprintf(output, sizeof(output), "\x1B[2J\x1B[H\x1B[3J\nTerminal %d sıfırlandı.\n", terminal_id + 1);
             write(write_pipe, output, strlen(output) + 1);
+            
+            // Pipe'ı tamamen temizlemek için boş bir null terminatör gönder
+            char null_term = '\0';
+            write(write_pipe, &null_term, 1);
+            
             continue;
         }
         
@@ -282,33 +325,57 @@ void terminal_process_main(int terminal_id, int read_pipe, int write_pipe) {
             
             // Borular oluştur
             int pipes[64][2]; // En fazla 64 boru
+            int pipes_created = 0;
             
             for (int i = 0; i < cmd_count - 1; i++) {
                 if (pipe(pipes[i]) == -1) {
                     snprintf(output, sizeof(output), "Pipe oluşturulamadı: %s\n", strerror(errno));
+                    // Oluşturulan boruları temizle
+                    for (int j = 0; j < pipes_created; j++) {
+                        close(pipes[j][0]);
+                        close(pipes[j][1]);
+                    }
                     write(write_pipe, output, strlen(output) + 1);
-                    continue;
+                    goto next_command;
                 }
+                pipes_created++;
             }
             
             // Son komutun çıktısını yakalamak için boru
             int final_pipe[2];
             if (pipe(final_pipe) == -1) {
                 snprintf(output, sizeof(output), "Final pipe oluşturulamadı: %s\n", strerror(errno));
+                // Oluşturulan boruları temizle
+                for (int j = 0; j < pipes_created; j++) {
+                    close(pipes[j][0]);
+                    close(pipes[j][1]);
+                }
                 write(write_pipe, output, strlen(output) + 1);
-                continue;
+                goto next_command;
             }
             
             // Her komut için çocuk süreç oluştur
             pid_t pids[64]; // En fazla 64 süreç
+            int processes_created = 0;
             
             for (int i = 0; i < cmd_count; i++) {
                 pids[i] = fork();
                 
                 if (pids[i] == -1) {
                     snprintf(output, sizeof(output), "Fork hatası: %s\n", strerror(errno));
+                    // Oluşturulan süreçleri sonlandır
+                    for (int j = 0; j < processes_created; j++) {
+                        kill(pids[j], SIGTERM);
+                    }
+                    // Oluşturulan boruları temizle
+                    for (int j = 0; j < pipes_created; j++) {
+                        close(pipes[j][0]);
+                        close(pipes[j][1]);
+                    }
+                    close(final_pipe[0]);
+                    close(final_pipe[1]);
                     write(write_pipe, output, strlen(output) + 1);
-                    continue;
+                    goto next_command;
                 }
                 
                 if (pids[i] == 0) {
@@ -410,111 +477,74 @@ void terminal_process_main(int terminal_id, int read_pipe, int write_pipe) {
                     chdir(current_dir);
                     
                     // Komutu çalıştır
-                    execvp(args[0], args);
+                    if (arg_count > 0) {
+                        execvp(args[0], args);
+                        // execvp başarısız olursa buraya ulaşır
+                        fprintf(stderr, "Komut çalıştırılamadı: %s (%s)\n", args[0], strerror(errno));
+                    } else {
+                        fprintf(stderr, "Geçersiz komut: Argüman bulunamadı\n");
+                    }
                     
-                    // execvp başarısız olursa buraya ulaşır
-                    fprintf(stderr, "Komut çalıştırılamadı: %s (%s)\n", args[0], strerror(errno));
                     exit(EXIT_FAILURE);
                 }
+                processes_created++;
             }
             
-            // Ebeveyn süreç: tüm boruları kapat
+            // Ebeveyn süreç
+            
+            // Tüm boruları kapat
             for (int i = 0; i < cmd_count - 1; i++) {
                 close(pipes[i][0]);
                 close(pipes[i][1]);
             }
-            close(final_pipe[1]); // Yazma ucunu kapat
+            close(final_pipe[1]);
             
-            // Son komutun çıktısını oku (eğer çıkış yönlendirme yoksa)
-            if (!has_output_redir) {
-                // Non-blocking I/O için dosya tanımlayıcısını ayarla
-                int flags = fcntl(final_pipe[0], F_GETFL, 0);
-                fcntl(final_pipe[0], F_SETFL, flags | O_NONBLOCK);
+            // Çıkış yönlendirme varsa, çıktı dosyaya yazılır
+            if (has_output_redir) {
+                snprintf(output, sizeof(output), "Çıktı '%s' dosyasına yönlendirildi.\n", output_file);
+                write(write_pipe, output, strlen(output) + 1);
+            } else {
+                // Çıktıyı oku
+                char temp_buffer[8192]; // Geçici tampon
                 
-                // Timeout için değişkenler
-                struct timeval tv;
-                fd_set readfds;
-                int ready;
+                // Tüm çocuk süreçlerin tamamlanmasını bekle
+                for (int i = 0; i < cmd_count; i++) {
+                    int status;
+                    waitpid(pids[i], &status, 0);
+                }
                 
-                // Okuma için hazırlan
-                FD_ZERO(&readfds);
-                FD_SET(final_pipe[0], &readfds);
+                // Çıktıyı doğrudan ilet - tampon kullanmadan
+                ssize_t bytes;
+                int total_sent = 0;
+                int has_output = 0;
                 
-                // 2 saniye timeout ayarla
-                tv.tv_sec = 2;
-                tv.tv_usec = 0;
-                
-                // select() ile timeout'lu okuma
-                ready = select(final_pipe[0] + 1, &readfds, NULL, NULL, &tv);
-                
-                if (ready == -1) {
-                    snprintf(output, sizeof(output), "Select hatası: %s\n", strerror(errno));
-                } else if (ready == 0) {
-                    // Timeout oluştu - veri yok
-                    snprintf(output, sizeof(output), "Komut çalışıyor, ancak henüz çıktı üretmedi.\n");
-                } else {
-                    // Veri okumaya hazır
-                    ssize_t bytes_read = read(final_pipe[0], output, sizeof(output) - 1);
-                    if (bytes_read == -1) {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                            // Veri henüz hazır değil
-                            snprintf(output, sizeof(output), "Komut çalışıyor, ancak henüz çıktı üretmedi.\n");
-                        } else {
-                            snprintf(output, sizeof(output), "Okuma hatası: %s\n", strerror(errno));
-                        }
-                    } else {
-                        // Veri okundu
-                        output[bytes_read] = '\0';
+                while ((bytes = read(final_pipe[0], temp_buffer, sizeof(temp_buffer) - 1)) > 0) {
+                    has_output = 1;
+                    temp_buffer[bytes] = '\0';
+                    write(write_pipe, temp_buffer, bytes);
+                    total_sent += bytes;
+                    
+                    // Çok büyük çıktılar için güvenlik kontrolü
+                    if (total_sent > 10 * 1024 * 1024) { // 10MB'dan fazla veri
+                        char overflow_msg[] = "\n... (çıktı çok büyük, kalan kısım kesildi) ...\n";
+                        write(write_pipe, overflow_msg, strlen(overflow_msg));
+                        break;
                     }
                 }
-            } else {
-                // Çıkış yönlendirme varsa, çıktı dosyaya yazılır
-                snprintf(output, sizeof(output), "Çıktı '%s' dosyasına yönlendirildi.\n", output_file);
+                
+                // Çıktı yoksa bilgi mesajı
+                if (!has_output) {
+                    strcpy(temp_buffer, "Komut tamamlandı (çıktı yok)\n");
+                    write(write_pipe, temp_buffer, strlen(temp_buffer) + 1);
+                } else {
+                    // Null terminatör gönder
+                    char null_term = '\0';
+                    write(write_pipe, &null_term, 1);
+                }
             }
             
             close(final_pipe[0]);
             
-            // Tüm çocuk süreçlerin tamamlanmasını bekle (WNOHANG ile non-blocking)
-            int last_status = 0;
-            for (int i = 0; i < cmd_count; i++) {
-                int status;
-                // WNOHANG ile non-blocking wait
-                if (waitpid(pids[i], &status, WNOHANG) == 0) {
-                    // Süreç hala çalışıyor
-                    if (i == cmd_count - 1) {
-                        // Son komut hala çalışıyorsa, bilgi mesajı ekle
-                        if (strlen(output) == 0) {
-                            snprintf(output, sizeof(output), "Komut arka planda çalışıyor...\n");
-                        }
-                    }
-                } else {
-                    // Süreç tamamlandı
-                    if (i == cmd_count - 1) {
-                        if (WIFEXITED(status)) {
-                            last_status = WEXITSTATUS(status);
-                            if (last_status != 0 && strlen(output) == 0) {
-                                snprintf(output, sizeof(output), "Komut çalıştırma hatası (kod: %d)\n", last_status);
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // Çıktıyı gönder (parçalı gönderim)
-            size_t output_len = strlen(output);
-            size_t chunk_size = 4000; // Daha küçük parçalar halinde gönder
-            
-            for (size_t i = 0; i < output_len; i += chunk_size) {
-                size_t current_chunk = (i + chunk_size < output_len) ? chunk_size : output_len - i;
-                write(write_pipe, output + i, current_chunk);
-                usleep(10000); // 10ms bekle, pipe'ın dolmasını önle
-            }
-            
-            // Null terminatör gönder
-            char null_term = '\0';
-            write(write_pipe, &null_term, 1);
-            
-            continue;
         } else {
             // Tek komut (boru olmadan)
             
@@ -620,6 +650,8 @@ void terminal_process_main(int terminal_id, int read_pipe, int write_pipe) {
                     execvp(args[0], args);
                     // execvp başarısız olursa buraya ulaşır
                     fprintf(stderr, "Komut çalıştırılamadı: %s (%s)\n", args[0], strerror(errno));
+                } else {
+                    fprintf(stderr, "Geçersiz komut: Argüman bulunamadı\n");
                 }
                 
                 exit(EXIT_FAILURE);
@@ -631,50 +663,55 @@ void terminal_process_main(int terminal_id, int read_pipe, int write_pipe) {
             // Çıkış yönlendirme varsa, çıktı dosyaya yazılır
             if (has_output_redir) {
                 snprintf(output, sizeof(output), "Çıktı '%s' dosyasına yönlendirildi.\n", output_file);
+                write(write_pipe, output, strlen(output) + 1);
             } else {
                 // Çıktıyı oku
-                memset(output, 0, sizeof(output));
-                ssize_t total_read = 0;
-                ssize_t bytes;
+                char temp_buffer[8192]; // Geçici tampon
                 
                 // Çocuk sürecin tamamlanmasını bekle
                 int status;
                 waitpid(pid, &status, 0);
                 
-                // Çıktıyı oku (parçalı okuma)
-                while ((bytes = read(pipefd[0], output + total_read, sizeof(output) - total_read - 1)) > 0) {
-                    total_read += bytes;
-                    if (total_read >= (ssize_t)(sizeof(output) - 1)) {
+                // Çıktıyı doğrudan ilet - tampon kullanmadan
+                ssize_t bytes;
+                int total_sent = 0;
+                int has_output = 0;
+                
+                while ((bytes = read(pipefd[0], temp_buffer, sizeof(temp_buffer) - 1)) > 0) {
+                    has_output = 1;
+                    temp_buffer[bytes] = '\0';
+                    write(write_pipe, temp_buffer, bytes);
+                    total_sent += bytes;
+                    
+                    // Çok büyük çıktılar için güvenlik kontrolü
+                    if (total_sent > 10 * 1024 * 1024) { // 10MB'dan fazla veri
+                        char overflow_msg[] = "\n... (çıktı çok büyük, kalan kısım kesildi) ...\n";
+                        write(write_pipe, overflow_msg, strlen(overflow_msg));
                         break;
                     }
                 }
                 
                 // Çıktı yoksa bilgi mesajı
-                if (total_read == 0) {
+                if (!has_output) {
                     if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
-                        snprintf(output, sizeof(output), "Komut çalıştırma hatası (kod: %d)\n", WEXITSTATUS(status));
+                        snprintf(temp_buffer, sizeof(temp_buffer), "Komut çalıştırma hatası (kod: %d)\n", WEXITSTATUS(status));
                     } else {
-                        strcpy(output, "Komut tamamlandı (çıktı yok)\n");
+                        strcpy(temp_buffer, "Komut tamamlandı (çıktı yok)\n");
                     }
+                    write(write_pipe, temp_buffer, strlen(temp_buffer) + 1);
+                } else {
+                    // Null terminatör gönder
+                    char null_term = '\0';
+                    write(write_pipe, &null_term, 1);
                 }
             }
             
             close(pipefd[0]);
-            
-            // Çıktıyı gönder (parçalı gönderim)
-            size_t output_len = strlen(output);
-            size_t chunk_size = 4000; // Daha küçük parçalar halinde gönder
-            
-            for (size_t i = 0; i < output_len; i += chunk_size) {
-                size_t current_chunk = (i + chunk_size < output_len) ? chunk_size : output_len - i;
-                write(write_pipe, output + i, current_chunk);
-                usleep(10000); // 10ms bekle, pipe'ın dolmasını önle
-            }
-            
-            // Null terminatör gönder
-            char null_term = '\0';
-            write(write_pipe, &null_term, 1);
         }
+        
+next_command:
+        // Bir sonraki komuta geç
+        continue;
     }
     
     // Terminal sürecini sonlandır
@@ -973,7 +1010,7 @@ int model_terminate_terminal_process(ShmBuf* shmp, int terminal_id) {
         kill(shmp->terminal_processes[idx].process_id, SIGTERM);
         
         // Kısa bir süre bekle
-        usleep(100000); // 100ms
+        usleep(50000); // 50ms - Bekleme süresi azaltıldı
         
         // Tekrar kontrol et
         result = waitpid(shmp->terminal_processes[idx].process_id, &status, WNOHANG);
@@ -982,56 +1019,28 @@ int model_terminate_terminal_process(ShmBuf* shmp, int terminal_id) {
             // Hala çalışıyor, SIGKILL gönder
             kill(shmp->terminal_processes[idx].process_id, SIGKILL);
             
-            // Sonlanmasını bekle
+            // Sürecin sonlanmasını bekle
             waitpid(shmp->terminal_processes[idx].process_id, &status, 0);
         }
     }
     
     // Pipe'ları kapat
-    close(shmp->terminal_processes[idx].pipe_to_terminal[1]);
-    close(shmp->terminal_processes[idx].pipe_from_terminal[0]);
+    if (shmp->terminal_processes[idx].pipe_to_terminal[1] >= 0) {
+        close(shmp->terminal_processes[idx].pipe_to_terminal[1]);
+        shmp->terminal_processes[idx].pipe_to_terminal[1] = -1;
+    }
     
-    // Terminal bilgilerini temizle
+    if (shmp->terminal_processes[idx].pipe_from_terminal[0] >= 0) {
+        close(shmp->terminal_processes[idx].pipe_from_terminal[0]);
+        shmp->terminal_processes[idx].pipe_from_terminal[0] = -1;
+    }
+    
+    // Terminal bilgilerini sıfırla
     shmp->terminal_processes[idx].terminal_id = -1;
     shmp->terminal_processes[idx].process_id = -1;
-    shmp->terminal_processes[idx].pipe_to_terminal[0] = -1;
-    shmp->terminal_processes[idx].pipe_to_terminal[1] = -1;
-    shmp->terminal_processes[idx].pipe_from_terminal[0] = -1;
-    shmp->terminal_processes[idx].pipe_from_terminal[1] = -1;
     shmp->terminal_processes[idx].active = false;
     
     return 0;
-}
-
-// Terminal sürecini sıfırla
-int model_reset_terminal_process(ShmBuf* shmp, int terminal_id) {
-    // Eğer shmp NULL ise, global değişkeni kullan
-    if (!shmp) {
-        shmp = g_shm_buffer;
-    }
-    
-    if (!shmp || terminal_id < 0) {
-        return -1;
-    }
-    
-    // Terminal indeksini bul
-    int idx = -1;
-    for (int i = 0; i < shmp->terminal_count; i++) {
-        if (shmp->terminal_processes[i].terminal_id == terminal_id && shmp->terminal_processes[i].active) {
-            idx = i;
-            break;
-        }
-    }
-    
-    if (idx == -1) {
-        return -1; // Terminal bulunamadı
-    }
-    
-    // Pipe tamponlarını temizle
-    flush_pipe(shmp->terminal_processes[idx].pipe_from_terminal[0]);
-    
-    // Reset komutu gönder
-    return model_send_command_to_terminal(shmp, terminal_id, "reset");
 }
 
 // Terminal sürecinin durumunu kontrol et
@@ -1042,7 +1051,7 @@ int model_check_terminal_process(ShmBuf* shmp, int terminal_id) {
     }
     
     if (!shmp || terminal_id < 0) {
-        return -1;
+        return -1; // Hata
     }
     
     // Terminal indeksini bul
@@ -1063,90 +1072,157 @@ int model_check_terminal_process(ShmBuf* shmp, int terminal_id) {
     pid_t result = waitpid(shmp->terminal_processes[idx].process_id, &status, WNOHANG);
     
     if (result == 0) {
-        return 1; // Süreç çalışıyor
+        // Süreç hala çalışıyor
+        return 1;
     } else if (result == shmp->terminal_processes[idx].process_id) {
         // Süreç sonlandı
         if (WIFEXITED(status)) {
-            return WEXITSTATUS(status); // Normal sonlanma
+            // Normal çıkış
+            return WEXITSTATUS(status);
         } else if (WIFSIGNALED(status)) {
-            return -2; // Sinyal ile sonlandırıldı
+            // Sinyal ile sonlandırıldı
+            return -2;
         } else {
-            return -3; // Diğer sonlanma
+            // Diğer durumlar
+            return -3;
         }
     } else {
-        return -4; // waitpid hatası
+        // Hata
+        return -4;
     }
 }
 
-// Komut çalıştırma (terminal_id parametresi eklendi)
+// Komut çalıştır
 int model_execute_command(const char* command, char* output, size_t output_size, int terminal_id) {
     if (!command || !output || output_size == 0 || terminal_id < 0) {
         return -1;
     }
     
-    // Boş komut kontrolü
-    if (strlen(command) == 0) {
-        output[0] = '\0';
+    // Komut geçerliliğini kontrol et
+    if (!is_valid_command(command)) {
+        snprintf(output, output_size, "Geçersiz komut: Boş veya sadece boşluk karakterleri içeren komut.\n");
         return 0;
     }
     
-    // Sıfırlama komutu kontrolü
-    if (strcmp(command, "reset") == 0 || strcmp(command, "clear") == 0) {
-        // Terminali sıfırla
-        if (model_reset_terminal_process(NULL, terminal_id) == 0) {
-            snprintf(output, output_size, "Terminal %d sıfırlandı.\n", terminal_id + 1);
-            return 0;
-        }
-    }
-    
-    // İnteraktif komut kontrolü
-    if (is_interactive_command(command)) {
-        // İnteraktif komut için özel mesaj
-        snprintf(output, output_size, 
-                "İnteraktif komut tespit edildi: %s\n"
-                "Bu komut kullanıcı girdisi bekliyor ve terminal arayüzünde doğrudan çalıştırılamaz.\n"
-                "Lütfen dosya yönlendirme kullanın (örn: cat < dosya.txt) veya argüman belirtin (örn: cat dosya.txt).\n", 
-                command);
-        return 0;
-    }
-    
-    // Terminal sürecine komutu gönder
-    if (model_send_command_to_terminal(NULL, terminal_id, command) != 0) {
-        snprintf(output, output_size, "Komut gönderilemedi. Terminal %d aktif değil veya hata oluştu.\n", terminal_id + 1);
+    // Global paylaşılan bellek işaretçisini kullan
+    ShmBuf* shmp = g_shm_buffer;
+    if (!shmp) {
         return -1;
     }
     
-    // Çıktıyı bekle (daha uzun bir süre)
-    usleep(500000); // 500ms (artırıldı)
+    // Terminal sürecinin durumunu kontrol et
+    int status = model_check_terminal_process(shmp, terminal_id);
+    
+    // Terminal süreci çalışmıyor veya hata oluşmuşsa yeniden başlat
+    if (status != 1) {
+        // Eski terminal sürecini sonlandır (eğer hala varsa)
+        model_terminate_terminal_process(shmp, terminal_id);
+        
+        // Yeni terminal süreci oluştur
+        if (model_create_terminal_process(shmp, terminal_id) != 0) {
+            snprintf(output, output_size, "Terminal %d başlatılamadı!\n", terminal_id + 1);
+            return -1;
+        }
+        
+        // Başlangıç mesajını oku
+        char init_output[4096] = {0};
+        // Bekleme süresi kaldırıldı
+        model_read_output_from_terminal(shmp, terminal_id, init_output, sizeof(init_output));
+    }
+    
+    // Terminal indeksini bul
+    int idx = -1;
+    for (int i = 0; i < shmp->terminal_count; i++) {
+        if (shmp->terminal_processes[i].terminal_id == terminal_id && shmp->terminal_processes[i].active) {
+            idx = i;
+            break;
+        }
+    }
+    
+    if (idx == -1) {
+        snprintf(output, output_size, "Terminal %d bulunamadı!\n", terminal_id + 1);
+        return -1;
+    }
+    
+    // Clear komutu için özel işlem
+    if (strcmp(command, "clear") == 0) {
+        // Önce pipe'ları temizle
+        flush_pipe(shmp->terminal_processes[idx].pipe_from_terminal[0]);
+        
+        // Terminali yeniden başlat
+        model_terminate_terminal_process(shmp, terminal_id);
+        
+        if (model_create_terminal_process(shmp, terminal_id) != 0) {
+            snprintf(output, output_size, "Terminal %d yeniden başlatılamadı!\n", terminal_id + 1);
+            return -1;
+        }
+        
+        // Başlangıç mesajını oku
+        char init_output[4096] = {0};
+        model_read_output_from_terminal(shmp, terminal_id, init_output, sizeof(init_output));
+        
+        // Ekranı temizle mesajı
+        snprintf(output, output_size, "\x1B[2J\x1B[H\x1B[3J\nTerminal %d sıfırlandı.\n", terminal_id + 1);
+        return 0;
+    }
+    
+    // Pipe'ları temizle
+    flush_pipe(shmp->terminal_processes[idx].pipe_from_terminal[0]);
+    
+    // Komutu gönder
+    if (model_send_command_to_terminal(shmp, terminal_id, command) != 0) {
+        snprintf(output, output_size, "Komut gönderilemedi!\n");
+        return -1;
+    }
     
     // Çıktıyı oku
-    int bytes_read = model_read_output_from_terminal(NULL, terminal_id, output, output_size);
+    memset(output, 0, output_size);
     
-    if (bytes_read < 0) {
-        snprintf(output, output_size, "Çıktı okunamadı. Terminal %d aktif değil veya hata oluştu.\n", terminal_id + 1);
-        return -1;
-    } else if (bytes_read == 0) {
-        // Çıktı yoksa, biraz daha bekle ve tekrar dene
-        usleep(500000); // 500ms daha bekle
-        bytes_read = model_read_output_from_terminal(NULL, terminal_id, output, output_size);
+    // Çıktı için bekleme
+    int max_attempts = 100; // Maksimum 100 deneme (1 saniye)
+    int attempts = 0;
+    ssize_t bytes_read = 0;
+    
+    while (attempts < max_attempts) {
+        bytes_read = model_read_output_from_terminal(shmp, terminal_id, output, output_size);
         
-        if (bytes_read <= 0) {
-            // Hala çıktı yoksa, muhtemelen komut bulunamadı
-            snprintf(output, output_size, "sh: %s: command not found\n", command);
+        if (bytes_read > 0) {
+            // Veri okundu
+            break;
+        } else if (bytes_read < 0) {
+            // Okuma hatası
+            return -1;
         }
+        
+        // Kısa bir süre bekle
+        usleep(10000); // 10ms - Bekleme süresi azaltıldı
+        attempts++;
+    }
+    
+    if (bytes_read == 0) {
+        // Zaman aşımı
+        snprintf(output, output_size, "Komut çıktısı alınamadı (zaman aşımı).\n");
+        return -1;
     }
     
     return 0;
 }
 
-// Mesaj gönderme
+// Mesaj gönder
 ShmBuf* model_send_message(ShmBuf* shmp, const char* message) {
+    // Eğer shmp NULL ise, global değişkeni kullan
+    if (!shmp) {
+        shmp = g_shm_buffer;
+    }
+    
     if (!shmp || !message) {
         return NULL;
     }
     
-    size_t len = strlen(message);
-    if (len == 0 || len >= shmp->buf_size) {
+    size_t msg_len = strlen(message) + 1; // Null terminatör dahil
+    
+    // Mesaj çok büyükse hata döndür
+    if (msg_len > shmp->buf_size) {
         return NULL;
     }
     
@@ -1163,9 +1239,16 @@ ShmBuf* model_send_message(ShmBuf* shmp, const char* message) {
     }
     #endif
     
+    // Tampon doluysa başa dön
+    if (shmp->cnt + msg_len > shmp->buf_size) {
+        shmp->cnt = 0;
+    }
+    
     // Mesajı kopyala
-    memcpy(shmp->msgbuf, message, len + 1); // null karakteri dahil
-    shmp->cnt = len;
+    memcpy(shmp->msgbuf + shmp->cnt, message, msg_len);
+    
+    // Sayacı güncelle
+    shmp->cnt += msg_len;
     
     // Semafor serbest bırak
     #ifdef __APPLE__
@@ -1183,8 +1266,13 @@ ShmBuf* model_send_message(ShmBuf* shmp, const char* message) {
     return shmp;
 }
 
-// Mesaj okuma
+// Mesajları oku
 int model_read_messages(ShmBuf* shmp, char* buffer, size_t buffer_size) {
+    // Eğer shmp NULL ise, global değişkeni kullan
+    if (!shmp) {
+        shmp = g_shm_buffer;
+    }
+    
     if (!shmp || !buffer || buffer_size == 0) {
         return -1;
     }
@@ -1203,18 +1291,53 @@ int model_read_messages(ShmBuf* shmp, char* buffer, size_t buffer_size) {
     #endif
     
     // Yeni mesaj var mı kontrol et
-    if (shmp->cnt > 0 && shmp->last_read_pos != shmp->cnt) {
-        // Mesajı kopyala
-        size_t copy_size = shmp->cnt < buffer_size - 1 ? shmp->cnt : buffer_size - 1;
-        memcpy(buffer, shmp->msgbuf, copy_size);
-        buffer[copy_size] = '\0';
-        
-        // Son okunan pozisyonu güncelle
-        shmp->last_read_pos = shmp->cnt;
-    } else {
+    if (shmp->last_read_pos >= shmp->cnt) {
         // Yeni mesaj yok
         buffer[0] = '\0';
+        
+        // Semafor serbest bırak
+        #ifdef __APPLE__
+        if (sem_post(shmp->sem_ptr) == -1) {
+            perror("sem_post failed");
+            return -1;
+        }
+        #else
+        if (sem_post(&shmp->sem) == -1) {
+            perror("sem_post failed");
+            return -1;
+        }
+        #endif
+        
+        return 0;
     }
+    
+    // Mesajı kopyala
+    size_t msg_len = strlen(shmp->msgbuf + shmp->last_read_pos) + 1; // Null terminatör dahil
+    
+    if (msg_len > buffer_size) {
+        // Tampon çok küçük
+        buffer[0] = '\0';
+        
+        // Semafor serbest bırak
+        #ifdef __APPLE__
+        if (sem_post(shmp->sem_ptr) == -1) {
+            perror("sem_post failed");
+            return -1;
+        }
+        #else
+        if (sem_post(&shmp->sem) == -1) {
+            perror("sem_post failed");
+            return -1;
+        }
+        #endif
+        
+        return -1;
+    }
+    
+    memcpy(buffer, shmp->msgbuf + shmp->last_read_pos, msg_len);
+    
+    // Son okunan pozisyonu güncelle
+    shmp->last_read_pos += msg_len;
     
     // Semafor serbest bırak
     #ifdef __APPLE__
@@ -1229,12 +1352,19 @@ int model_read_messages(ShmBuf* shmp, char* buffer, size_t buffer_size) {
     }
     #endif
     
-    return strlen(buffer);
+    return 1;
 }
 
-// Temizleme
+// Kaynakları temizle
 void model_cleanup(ShmBuf* shmp) {
-    if (!shmp) return;
+    // Eğer shmp NULL ise, global değişkeni kullan
+    if (!shmp) {
+        shmp = g_shm_buffer;
+    }
+    
+    if (!shmp) {
+        return;
+    }
     
     // Tüm terminal süreçlerini sonlandır
     for (int i = 0; i < shmp->terminal_count; i++) {
@@ -1243,25 +1373,24 @@ void model_cleanup(ShmBuf* shmp) {
         }
     }
     
+    // Paylaşılan belleği temizle
     #ifdef __APPLE__
-    // macOS için temizleme
+    // macOS için
     if (shmp->sem_ptr) {
         sem_close(shmp->sem_ptr);
         sem_unlink("/mysem");
     }
     free(shmp);
     #else
-    // Linux için temizleme
-    sem_destroy(&shmp->sem);
-    
+    // Linux için
     if (shmp->fd >= 0) {
+        sem_destroy(&shmp->sem);
+        munmap(shmp, sizeof(ShmBuf) + shmp->buf_size);
         close(shmp->fd);
         shm_unlink(SHARED_FILE_PATH);
     }
-    
-    munmap(shmp, sizeof(ShmBuf) + shmp->buf_size);
     #endif
     
-    // Global değişkeni temizle
+    // Global değişkeni sıfırla
     g_shm_buffer = NULL;
 }

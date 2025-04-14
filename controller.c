@@ -133,7 +133,7 @@ int controller_execute_command(Controller *controller, int terminal_id, const ch
         
         // Başlangıç mesajını oku
         char output[4096] = {0};
-        usleep(100000); // 100ms bekle
+        // Bekleme süresi kaldırıldı - performansı artırmak için
         model_read_output_from_terminal(controller->model, terminal_id, output, sizeof(output));
         if (strlen(output) > 0) {
             view_update_terminal_output(controller->view, terminal_id, output, true);
@@ -302,7 +302,8 @@ gboolean controller_check_terminals(gpointer user_data) {
             
             // Başlangıç mesajını oku
             char output[4096] = {0};
-            usleep(100000); // 100ms bekle
+            // Bekleme süresi azaltıldı - performansı artırmak için
+            usleep(30000); // 30ms (100ms yerine)
             model_read_output_from_terminal(controller->model, terminal_id, output, sizeof(output));
             if (strlen(output) > 0) {
                 view_update_terminal_output(controller->view, terminal_id, output, true);
@@ -338,7 +339,8 @@ int controller_create_terminal(Controller *controller) {
     
     // Başlangıç mesajını oku
     char output[4096] = {0};
-    usleep(100000); // 100ms bekle
+    // Bekleme süresi azaltıldı - performansı artırmak için
+    usleep(30000); // 30ms (100ms yerine)
     model_read_output_from_terminal(controller->model, terminal_id, output, sizeof(output));
     if (strlen(output) > 0) {
         view_update_terminal_output(controller->view, terminal_id, output, true);
