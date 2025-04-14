@@ -5,6 +5,9 @@
 #include <stdbool.h>
 #include "model.h"
 
+// Komut geçmişi için maksimum komut sayısı
+#define MAX_COMMAND_HISTORY 50
+
 // View yapısı
 typedef struct {
     // Ana pencere ve konteynerler
@@ -18,6 +21,11 @@ typedef struct {
     GtkWidget **input_entries;        // Komut giriş alanları (GtkEntry)
     int *terminal_ids;                // Terminal ID'leri
     int next_terminal_id;             // Sonraki benzersiz terminal ID'si
+    
+    // Komut geçmişi
+    char ***command_history;          // Her terminal için komut geçmişi
+    int **history_positions;          // Her terminal için geçmiş pozisyonu
+    int *history_counts;              // Her terminal için geçmiş komut sayısı
     
     // Mesaj paneli widget'ları
     GtkWidget *message_panel;         // Mesaj paneli konteynerı

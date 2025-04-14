@@ -42,7 +42,13 @@ View* view_init(GtkApplication *app, ShmBuf *shm_buffer) {
     view->terminal_ids = g_new0(int, view->max_terminals); // Terminal ID'lerini takip etmek için
     view->next_terminal_id = 0; // Benzersiz terminal ID'leri için sayaç
     
-    if (!view->terminal_views || !view->terminal_buffers || !view->input_entries || !view->terminal_ids) {
+    // Komut geçmişi dizilerini oluştur
+    view->command_history = g_new0(char**, view->max_terminals);
+    view->history_positions = g_new0(int*, view->max_terminals);
+    view->history_counts = g_new0(int, view->max_terminals);
+    
+    if (!view->terminal_views || !view->terminal_buffers || !view->input_entries || !view->terminal_ids ||
+        !view->command_history || !view->history_positions || !view->history_counts) {
         view_cleanup(view);
         return NULL;
     }
@@ -164,6 +170,68 @@ const char *css_data =
     return view;
 }
 
+// Tuş basma olayını işleyen fonksiyon
+static gboolean on_key_press_event(GtkEventController *controller, guint keyval, 
+                                  guint keycode, GdkModifierType state, gpointer user_data) {
+    View *view = (View *)user_data;
+    GtkWidget *entry = gtk_event_controller_get_widget(controller);
+    int terminal_id = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(entry), "terminal_id"));
+    int terminal_index = view_find_terminal_index(view, terminal_id);
+    
+    if (terminal_index < 0) return FALSE;
+    
+    // Yukarı ok tuşu kontrolü
+    if (keyval == GDK_KEY_Up) {
+        // Geçmiş komut var mı kontrol et
+        if (view->history_counts[terminal_index] > 0) {
+            // Geçmiş pozisyonunu güncelle
+            if (view->history_positions[terminal_index][0] < 0) {
+                // İlk yukarı ok tuşu basımı
+                view->history_positions[terminal_index][0] = view->history_counts[terminal_index] - 1;
+            } else if (view->history_positions[terminal_index][0] > 0) {
+                // Daha eski komutlara git
+                view->history_positions[terminal_index][0]--;
+            }
+            
+            // Geçmiş komutu giriş alanına yerleştir
+            int pos = view->history_positions[terminal_index][0];
+            if (pos >= 0 && pos < view->history_counts[terminal_index]) {
+                GtkEntryBuffer *buffer = gtk_entry_get_buffer(GTK_ENTRY(entry));
+                gtk_entry_buffer_set_text(buffer, view->command_history[terminal_index][pos], -1);
+                // İmleci sona konumlandır
+                gtk_editable_set_position(GTK_EDITABLE(entry), -1);
+            }
+        }
+        return TRUE; // Olayı işledik
+    } 
+    // Aşağı ok tuşu kontrolü
+    else if (keyval == GDK_KEY_Down) {
+        // Geçmiş komut var mı kontrol et
+        if (view->history_counts[terminal_index] > 0 && view->history_positions[terminal_index][0] >= 0) {
+            // Geçmiş pozisyonunu güncelle
+            if (view->history_positions[terminal_index][0] < view->history_counts[terminal_index] - 1) {
+                // Daha yeni komutlara git
+                view->history_positions[terminal_index][0]++;
+                
+                // Geçmiş komutu giriş alanına yerleştir
+                int pos = view->history_positions[terminal_index][0];
+                GtkEntryBuffer *buffer = gtk_entry_get_buffer(GTK_ENTRY(entry));
+                gtk_entry_buffer_set_text(buffer, view->command_history[terminal_index][pos], -1);
+                // İmleci sona konumlandır
+                gtk_editable_set_position(GTK_EDITABLE(entry), -1);
+            } else {
+                // En son komuttan sonra boş giriş
+                view->history_positions[terminal_index][0] = view->history_counts[terminal_index];
+                GtkEntryBuffer *buffer = gtk_entry_get_buffer(GTK_ENTRY(entry));
+                gtk_entry_buffer_set_text(buffer, "", 0);
+            }
+        }
+        return TRUE; // Olayı işledik
+    }
+    
+    return FALSE; // Diğer tuşlar için normal işleme devam et
+}
+
 // Yeni bir terminal sekmesi oluşturur
 int view_add_terminal(View *view, const char *title) {
     if (!view || view->terminal_count >= view->max_terminals) {
@@ -200,6 +268,17 @@ int view_add_terminal(View *view, const char *title) {
     view->input_entries[terminal_index] = gtk_entry_new();
     gtk_widget_set_hexpand(view->input_entries[terminal_index], TRUE);
     gtk_box_append(GTK_BOX(input_box), view->input_entries[terminal_index]);
+    
+    // Komut geçmişi için bellek ayır
+    view->command_history[terminal_index] = g_new0(char*, MAX_COMMAND_HISTORY);
+    view->history_positions[terminal_index] = g_new0(int, 1);
+    view->history_positions[terminal_index][0] = -1; // Başlangıçta geçmiş pozisyonu -1
+    view->history_counts[terminal_index] = 0;
+    
+    // Tuş basma olayı için olay denetleyicisi ekle
+    GtkEventController *key_controller = gtk_event_controller_key_new();
+    g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_key_press_event), view);
+    gtk_widget_add_controller(view->input_entries[terminal_index], key_controller);
     
     // Sekme başlığı için kutu
     GtkWidget *tab_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
@@ -413,6 +492,37 @@ int view_clear_terminal(View *view, int terminal_id) {
 void view_cleanup(View *view) {
     if (!view) return;
     
+    // Komut geçmişini temizle
+    if (view->command_history) {
+        for (int i = 0; i < view->terminal_count; i++) {
+            if (view->command_history[i]) {
+                // Her komut için belleği serbest bırak
+                for (int j = 0; j < view->history_counts[i]; j++) {
+                    if (view->command_history[i][j]) {
+                        g_free(view->command_history[i][j]);
+                    }
+                }
+                g_free(view->command_history[i]);
+            }
+        }
+        g_free(view->command_history);
+    }
+    
+    // Geçmiş pozisyonlarını temizle
+    if (view->history_positions) {
+        for (int i = 0; i < view->terminal_count; i++) {
+            if (view->history_positions[i]) {
+                g_free(view->history_positions[i]);
+            }
+        }
+        g_free(view->history_positions);
+    }
+    
+    // Geçmiş sayılarını temizle
+    if (view->history_counts) {
+        g_free(view->history_counts);
+    }
+    
     // Dizileri temizle
     if (view->terminal_views) g_free(view->terminal_views);
     if (view->terminal_buffers) g_free(view->terminal_buffers);
@@ -452,6 +562,40 @@ void on_command_entry_activated(GtkEntry *entry, gpointer user_data) {
     char prompt[512];
     view_update_terminal_output(view, terminal_id, command, false);
     
+    // Komutu geçmişe ekle, ancak son komutla aynı değilse
+    int add_to_history = 1;
+    
+    // Son komutla aynı mı kontrol et
+    if (view->history_counts[terminal_index] > 0) {
+        int last_cmd_index = view->history_counts[terminal_index] - 1;
+        if (view->command_history[terminal_index][last_cmd_index] && 
+            strcmp(view->command_history[terminal_index][last_cmd_index], command) == 0) {
+            // Aynı komut, geçmişe ekleme
+            add_to_history = 0;
+        }
+    }
+    
+    if (add_to_history) {
+        if (view->history_counts[terminal_index] >= MAX_COMMAND_HISTORY) {
+            // En eski komutu serbest bırak
+            if (view->command_history[terminal_index][0]) {
+                g_free(view->command_history[terminal_index][0]);
+            }
+            
+            // Komutları kaydır
+            for (int i = 0; i < MAX_COMMAND_HISTORY - 1; i++) {
+                view->command_history[terminal_index][i] = view->command_history[terminal_index][i + 1];
+            }
+            view->history_counts[terminal_index] = MAX_COMMAND_HISTORY - 1;
+        }
+        
+        // Yeni komutu ekle
+        view->command_history[terminal_index][view->history_counts[terminal_index]] = g_strdup(command);
+        view->history_counts[terminal_index]++;
+    }
+    
+    // Geçmiş pozisyonunu sıfırla
+    view->history_positions[terminal_index][0] = -1;
     
     // "exit" komutu kontrolü
     if (strcmp(command, "exit") == 0) {
