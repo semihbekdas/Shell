@@ -1,0 +1,12 @@
+# Build outputs
+*.o
+*.a
+*.so
+*.dylib
+*.dSYM/
+multi_shell_app
+test
+
+# OS / editor
+.DS_Store
+.idea/
