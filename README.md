@@ -1,5 +1,12 @@
 # Multi-User Communicating Shells
 
+![C](https://img.shields.io/badge/C-A8B9CC?logo=c&logoColor=black)
+![GTK4](https://img.shields.io/badge/GTK-4-4A86CF?logo=gtk&logoColor=white)
+![POSIX](https://img.shields.io/badge/POSIX-shared%20memory%20%7C%20semaphores-555)
+![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)
+
+📄 Detaylı tasarım ve uygulama notları için: [Proje Raporu](<Multi-User Communicating Shells - Proje Raporu.md>)
+
 ## ENG
 
 A terminal-like application that allows multiple shell instances to run in parallel and communicate through a shared message buffer. Built using the MVC (Model-View-Controller) architecture with a graphical user interface provided by the GTK4 library.
